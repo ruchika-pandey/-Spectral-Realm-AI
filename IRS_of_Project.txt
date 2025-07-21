@@ -1,0 +1,163 @@
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Embedding, GlobalAveragePooling1D, Dropout, BatchNormalization
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.utils import to_categorical
+from sklearn.model_selection import train_test_split
+from sklearn.utils.class_weight import compute_class_weight
+from sklearn.metrics.pairwise import cosine_similarity
+from sentence_transformers import SentenceTransformer
+import random
+import json
+import re
+from difflib import get_close_matches
+
+# Load intents from JSON file
+with open(r"C:\Users\Administrator\Downloads\Ruchix x Me (IDS).json", 'r') as file:
+    intents = json.load(file)
+
+semantic_model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
+
+
+# **Typo Correction using Levenshtein Distance**
+def correct_input(user_input):
+    all_patterns = [pattern for data in intents.values() for pattern in data["patterns"]]
+    match = get_close_matches(user_input, all_patterns, n=1, cutoff=0.7)
+    if match:
+        return match[0]
+    return user_input
+
+
+# Preprocessing
+tokenizer = Tokenizer()
+all_patterns = []
+labels = []
+label_index = {}
+
+for i, (intent, data) in enumerate(intents.items()):
+    label_index[intent] = i
+    for pattern in data["patterns"]:
+        pattern = re.sub(r'[^\w\s]', '', pattern.lower())
+        all_patterns.append(pattern)
+        labels.append(i)
+
+tokenizer.fit_on_texts(all_patterns)
+total_words = len(tokenizer.word_index) + 1
+sequences = tokenizer.texts_to_sequences(all_patterns)
+max_length = max(len(seq) for seq in sequences)
+padded_sequences = pad_sequences(sequences, maxlen=max_length, padding='post')
+
+labels = to_categorical(labels, num_classes=len(intents))
+
+# **Class Weights Calculation**
+class_weights = compute_class_weight(
+    class_weight='balanced',
+    classes=np.unique(np.argmax(labels, axis=1)),
+    y=np.argmax(labels, axis=1)
+)
+class_weights = dict(enumerate(class_weights))
+
+# **Split data into training and validation sets**
+X_train, X_val, y_train, y_val = train_test_split(padded_sequences, labels, test_size=0.2, stratify=labels,
+                                                  random_state=42)
+
+# **Model with Batch Normalization and Reduced Dropout**
+model = Sequential([
+    Embedding(total_words, 64, input_length=max_length),
+    GlobalAveragePooling1D(),
+    Dense(64, activation='relu'),
+    BatchNormalization(),
+    Dropout(0.3),
+    Dense(32, activation='relu'),
+    BatchNormalization(),
+    Dropout(0.2),
+    Dense(len(intents), activation='softmax')
+])
+
+model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+
+# **Early stopping** on val_loss
+early_stopping = tf.keras.callbacks.EarlyStopping(
+    monitor='val_loss',
+    patience=20,
+    restore_best_weights=True
+)
+
+# **Train model** with class weights
+model.fit(
+    X_train,
+    y_train,
+    epochs=200,
+    validation_data=(X_val, y_val),
+    shuffle=True,
+    callbacks=[early_stopping],
+    class_weight=class_weights
+)
+
+# **Save model**
+model.save("intent_model.keras")
+
+# **Generate embeddings for semantic similarity**
+intent_embeddings = {intent: semantic_model.encode(data["patterns"]) for intent, data in intents.items()}
+
+# **Context Tracking**
+last_intent = None
+
+
+# Function to get intent based on similarity
+def get_intent(user_input):
+    global last_intent
+    user_input = correct_input(user_input)  # Correct typos before matching
+    user_embedding = semantic_model.encode(user_input)
+    best_intent = None
+    best_score = -1
+    for intent, embeddings in intent_embeddings.items():
+        # Ensure embeddings is a 2D array
+        if len(embeddings.shape) == 1:
+            embeddings = embeddings.reshape(1, -1)
+        scores = cosine_similarity(embeddings, user_embedding.reshape(1, -1)).flatten()
+        max_score = np.max(scores)
+        if max_score > best_score:
+            best_score = max_score
+            best_intent = intent
+
+    # Context-based improvement
+    if best_score > 0.75:  # Increased threshold
+        last_intent = best_intent
+        return best_intent
+    elif last_intent:
+        return last_intent  # Use last context if score is low
+    else:
+        return None
+
+
+# Function to get response
+def get_intent_response(user_input):
+    intent_name = get_intent(user_input)
+    print(f"Detected intent: {intent_name}")  # Debugging
+    if not intent_name:
+        sequence = tokenizer.texts_to_sequences([user_input])
+        padded = pad_sequences(sequence, maxlen=max_length, padding='post')
+        prediction = model.predict(padded, verbose=0)
+        intent_index = np.argmax(prediction)
+        intent_name = list(label_index.keys())[intent_index]
+        print(f"Predicted intent: {intent_name}")  # Debugging
+
+    # Fallback response if intent is unclear
+    if intent_name:
+        responses = intents[intent_name]["responses"]
+        return random.choice(responses)
+    else:
+        return "I'm not sure about that. Can you clarify?"
+
+
+# User interaction loop
+print("Intent Recognition System Active. Type 'exit' to quit.\n")
+while True:
+    user_input = input("You: ").strip().lower()
+    if user_input == "exit":
+        break
+    response = get_intent_response(user_input)
+    print(f"NPC: {response}")
