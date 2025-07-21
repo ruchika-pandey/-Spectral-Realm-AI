@@ -6,6 +6,7 @@ Leveraging a hybrid BiLSTM-Conv1D model with Sentence-BERT embeddings, SR AI ach
 This offline-capable system overcomes the limitations of static dialogue, fostering immersive, player-driven narratives for applications in RPGs, educational games, and mental health-focused gaming.
 
 Key Contributions:
+
 -->Designed and trained a deep learning model for real-time intent recognition and dialogue generation.
 
 -->Implemented a modular Tkinter-based GUI for seamless user interaction and performance visualization.
